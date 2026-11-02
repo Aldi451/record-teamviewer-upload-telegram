@@ -9,38 +9,53 @@ import argparse
 import glob
 from pyrogram import Client
 
-# --- KONFIGURASI ---
-SOURCE_DIR = r"D:\PowerPro\Record"
-ARCHIVE_DIR = r"D:\PowerPro\Record\Zip\ARCHIVE"
-SEVEN_ZIP = r"D:\PowerPro\AutoBackupRestore_OK\7-Zip\7z.exe"
-DB_FILE = "file_status.db"
-LOG_FILE = "automation.log"
+# -----------------------------
+# CONFIG (bisa diisi via env)
+# -----------------------------
+SOURCE_DIR = os.getenv("POWERPRO_SOURCE_DIR", r"D:\PowerPro\Record")
+ARCHIVE_DIR = os.getenv("POWERPRO_ARCHIVE_DIR", r"D:\PowerPro\Record\Zip\ARCHIVE")
+SEVEN_ZIP = os.getenv("POWERPRO_SEVEN_ZIP", r"D:\PowerPro\AutoBackupRestore_OK\7-Zip\7z.exe")
+DB_FILE = os.getenv("POWERPRO_DB_FILE", "file_status.db")
+LOG_FILE = os.getenv("POWERPRO_LOG_FILE", "automation.log")
 
-# --- TELEGRAM CONFIG (Diisi dari my.telegram.org & @BotFather) ---
-API_ID = 39182435                   
-API_HASH = "239d53bcbbbdc55decc56ca84ac37dea"    
-BOT_TOKEN = "8027739654:AAFBOBtOv89c41AtX0qXgOP204J3Odw_JBQ"  
-CHAT_ID = "6888495331"             
+TG_API_ID = os.getenv("TG_API_ID", "0")
+TG_API_HASH = os.getenv("TG_API_HASH", "")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
-DRY_RUN = False  # Flag global default
+DRY_RUN = False
 
-# Logging ke file + console dengan UTF-8
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
+# -----------------------------
+# LOGGING
+# -----------------------------
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(LOG_FILE, encoding="utf-8"),
+            logging.StreamHandler()
+        ]
+    )
+    logging.getLogger("pyrogram").setLevel(logging.WARNING)
 
-# [REVISI]: Membungkam spam log internal (Disconnect/Connect) dari Pyrogram
-logging.getLogger("pyrogram").setLevel(logging.WARNING)
+# -----------------------------
+# PYROGRAM CLIENT
+# -----------------------------
+def get_app():
+    if DRY_RUN:
+        return None
+    if not TG_API_ID or TG_API_ID == "0" or not TG_API_HASH or not TG_BOT_TOKEN:
+        raise RuntimeError(
+            "Telegram credentials belum lengkap. Isi env: TG_API_ID, TG_API_HASH, TG_BOT_TOKEN, TG_CHAT_ID"
+        )
+    return Client("powerpro_uploader", api_id=int(TG_API_ID), api_hash=TG_API_HASH, bot_token=TG_BOT_TOKEN)
 
-# Inisialisasi Pyrogram Client
-app = Client("powerpro_uploader", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = None
 
-
+# -----------------------------
+# DATABASE
+# -----------------------------
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     conn.execute("CREATE TABLE IF NOT EXISTS uploads (file_hash TEXT PRIMARY KEY)")
@@ -62,10 +77,12 @@ def mark_as_uploaded(file_hash):
     conn.commit()
     conn.close()
 
-
+# -----------------------------
+# FILE HELPERS
+# -----------------------------
 def get_file_hash(filepath):
     hasher = hashlib.md5()
-    with open(filepath, 'rb') as f:
+    with open(filepath, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
             hasher.update(chunk)
     return hasher.hexdigest()
@@ -74,7 +91,7 @@ def get_file_hash(filepath):
 def is_file_locked(filepath):
     try:
         if os.path.exists(filepath):
-            with open(filepath, 'a'):
+            with open(filepath, "a"):
                 pass
         return False
     except (OSError, IOError):
@@ -89,16 +106,15 @@ def test_zip_integrity(zip_base):
     except Exception:
         return False
 
-
-# [REVISI]: Variabel global dan modifikasi fungsi progress_callback 
-# untuk mencegah layar kedap-kedip dan bottleneck terminal
+# -----------------------------
+# TELEGRAM UPLOAD
+# -----------------------------
 last_print_time = 0
+
 
 def progress_callback(current, total, filename):
     global last_print_time
     current_time = time.time()
-    
-    # Hanya update teks terminal setiap 2 detik atau jika sudah 100%
     if (current_time - last_print_time) > 2 or current == total:
         percent = (current / total) * 100
         current_mb = current / (1024 * 1024)
@@ -113,16 +129,20 @@ def upload_to_telegram(filepath, retries=3, delay=5):
         logging.info(f"[DRY-RUN] Would upload {filename} to Telegram")
         return True
 
+    global app
+    if app is None:
+        app = get_app()
+
     for attempt in range(1, retries + 1):
         try:
             logging.info(f"Mengirim {filename} ke Telegram via Pyrogram (Max 2GB)...")
             app.send_document(
-                chat_id=int(CHAT_ID) if CHAT_ID.lstrip('-').isdigit() else CHAT_ID,
+                chat_id=int(TG_CHAT_ID) if str(TG_CHAT_ID).lstrip("-").isdigit() else TG_CHAT_ID,
                 document=filepath,
                 caption=f"Archive: {filename}",
                 progress=lambda current, total: progress_callback(current, total, filename)
             )
-            print()  # Newline setelah progress bar selesai
+            print()
             logging.info(f"✅ Upload sukses: {filename}")
             return True
         except Exception as e:
@@ -130,30 +150,34 @@ def upload_to_telegram(filepath, retries=3, delay=5):
             logging.error(f"Error upload {filename} (Percobaan {attempt}/{retries}): {e}")
             if attempt < retries:
                 time.sleep(delay * attempt)
-
     return False
 
 
 def send_message(text):
+    global app
     if DRY_RUN:
         logging.info(f"[DRY-RUN] Would send notification: {text}")
         return
+    if app is None:
+        app = get_app()
     try:
         app.send_message(
-            chat_id=int(CHAT_ID) if CHAT_ID.lstrip('-').isdigit() else CHAT_ID,
+            chat_id=int(TG_CHAT_ID) if str(TG_CHAT_ID).lstrip("-").isdigit() else TG_CHAT_ID,
             text=text
         )
         logging.info(f"📢 Notifikasi terkirim: {text}")
     except Exception as e:
         logging.error(f"Error kirim notifikasi: {e}")
 
-
+# -----------------------------
+# PROCESSING
+# -----------------------------
 def process_existing_zips():
     current_month = time.strftime("%m-%Y")
     for file_name in os.listdir(ARCHIVE_DIR):
         if not (file_name.endswith(".zip") or ".zip." in file_name):
             continue
-        if file_name.startswith(current_month):  # skip bulan berjalan
+        if file_name.startswith(current_month):
             continue
 
         zip_path = os.path.join(ARCHIVE_DIR, file_name)
@@ -161,7 +185,6 @@ def process_existing_zips():
             continue
 
         file_hash = get_file_hash(zip_path)
-
         if not is_uploaded(file_hash):
             logging.info(f"Found archive {file_name}, uploading...")
             if upload_to_telegram(zip_path):
@@ -185,7 +208,7 @@ def run_automation():
     os.makedirs(SOURCE_DIR, exist_ok=True)
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
 
-    # 1. Group .tvs files by mm-yyyy
+    # 1. Pindahkan .tvs ke folder berdasarkan bulan
     for file_name in os.listdir(SOURCE_DIR):
         if not file_name.lower().endswith(".tvs"):
             continue
@@ -201,7 +224,7 @@ def run_automation():
         except Exception as e:
             logging.error(f"Error grouping file {file_name}: {e}")
 
-    # 2. Process each month folder (skip current month)
+    # 2. Kompres file bulan sebelumnya
     current_month = time.strftime("%m-%Y")
     for folder_name in os.listdir(ARCHIVE_DIR):
         if folder_name == current_month:
@@ -212,7 +235,11 @@ def run_automation():
         if not os.path.isdir(folder_path):
             continue
 
-        source_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+        source_files = [
+            os.path.join(folder_path, f)
+            for f in os.listdir(folder_path)
+            if os.path.isfile(os.path.join(folder_path, f))
+        ]
         if not source_files:
             continue
 
@@ -228,19 +255,13 @@ def run_automation():
         zip_base = os.path.join(ARCHIVE_DIR, f"{folder_name}.zip")
 
         try:
-            # [REVISI]: Menurunkan ukuran split zip dari -v1900m menjadi -v500m 
-            # agar upload lebih stabil dan tidak rawan putus koneksi di tengah jalan
             cmd = [SEVEN_ZIP, "a", "-tzip", "-mx=1", "-v500m", zip_base] + new_files
             logging.info(f"Compressing {folder_name} (split @ 500MB max)...")
+            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
-
-            # Cari file zip / part zip hasil kompresi (.zip, .zip.001, dll)
             created_archives = sorted(glob.glob(os.path.join(ARCHIVE_DIR, f"{folder_name}.zip*")))
 
-            # Verifikasi integritas kompresi
             if created_archives and test_zip_integrity(created_archives[0]):
-                # Hapus file sumber .tvs jika kompresi sukses
                 for fpath in new_files:
                     try:
                         os.remove(fpath)
@@ -248,11 +269,9 @@ def run_automation():
                     except Exception as e:
                         logging.error(f"Failed to remove source file {fpath}: {e}")
 
-                # Upload setiap part archive hasil kompresi
                 for arch_file in created_archives:
                     file_hash = get_file_hash(arch_file)
                     arch_name = os.path.basename(arch_file)
-
                     if not is_uploaded(file_hash):
                         if upload_to_telegram(arch_file):
                             mark_as_uploaded(file_hash)
@@ -273,23 +292,44 @@ def run_automation():
             logging.error(f"Compression failed for {folder_name}: {e}")
             continue
 
-    # 3. Process zip lama yang sudah ada di folder ARCHIVE
+    # 3. Proses zip lama yang sudah ada
     process_existing_zips()
 
     logging.info("=== Program selesai ===")
     print("Program selesai. Semua proses sudah dijalankan.")
 
-
-if __name__ == "__main__":
-    init_db()
+# -----------------------------
+# CLI
+# -----------------------------
+def parse_args():
     parser = argparse.ArgumentParser(description="Run Telegram upload automation")
     parser.add_argument("--dry-run", action="store_true", help="Simulate run without uploading")
-    args = parser.parse_args()
+    parser.add_argument("--once", action="store_true", help="Run once and exit immediately")
+    return parser.parse_args()
 
+
+def main():
+    args = parse_args()
+    global DRY_RUN
     DRY_RUN = args.dry_run
+
+    setup_logging()
+    init_db()
+
+    if args.once:
+        run_automation()
+        return
 
     if DRY_RUN:
         run_automation()
     else:
-        with app:
+        client = get_app()
+        if client is None:
+            logging.error("Telegram client tidak bisa dibuat.")
+            return
+        with client:
             run_automation()
+
+
+if __name__ == "__main__":
+    main()
