@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import logging
 import servicemanager
@@ -6,13 +7,16 @@ import win32event
 import win32service
 import win32serviceutil
 
-from upload_telegram import run_automation, init_db, setup_logging
+import upload_telegram
 
 
 class TelegramUploadService(win32serviceutil.ServiceFramework):
     _svc_name_ = "PowerProTelegramUploader"
     _svc_display_name_ = "PowerPro Telegram Uploader"
-    _svc_description_ = "Mengarsip dan upload file .tvs ke Telegram tanpa prompt dan tanpa jendela console."
+    _svc_description_ = (
+        "Mengarsip dan upload file .tvs ke Telegram tanpa prompt, tanpa console, "
+        "dengan polling ringan dan aman."
+    )
 
     def __init__(self, args):
         super().__init__(args)
@@ -26,22 +30,22 @@ class TelegramUploadService(win32serviceutil.ServiceFramework):
         servicemanager.LogMsg(
             servicemanager.EVENTLOG_INFORMATION_TYPE,
             servicemanager.PYS_SERVICE_STARTED,
-            (self._svc_name_, '')
+            (self._svc_name_, "")
         )
         self.main_loop()
 
     def main_loop(self):
-        setup_logging()
-        init_db()
+        upload_telegram.setup_logging()
+        upload_telegram.init_db()
         logging.info("Windows service started.")
 
         while True:
             try:
-                run_automation()
+                upload_telegram.run_automation()
             except Exception as exc:
                 logging.exception(f"Service error: {exc}")
 
-            wait_result = win32event.WaitForSingleObject(self.stop_event, 300000)
+            wait_result = win32event.WaitForSingleObject(self.stop_event, upload_telegram.POLL_SECONDS * 1000)
             if wait_result == win32event.WAIT_OBJECT_0:
                 break
 
