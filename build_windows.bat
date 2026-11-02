@@ -10,8 +10,13 @@ if errorlevel 1 (
 
 py -m pip install --upgrade pip
 if errorlevel 1 exit /b 1
-py -m pip install -r requirements.txt TgCrypto
+py -m pip install -r requirements.txt
 if errorlevel 1 exit /b 1
+
+rem TgCrypto is optional; only install it if a prebuilt wheel exists.
+rem Avoid compiling from source, which requires Microsoft C++ Build Tools.
+py -m pip install --only-binary=:all: TgCrypto >nul 2>nul
+if errorlevel 1 echo TgCrypto wheel unavailable; continuing without the optional speedup.
 
 py -m PyInstaller --clean --noconfirm --onefile --noconsole ^
   --name powerpro_uploader_service ^
